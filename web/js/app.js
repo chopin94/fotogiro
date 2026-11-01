@@ -906,8 +906,10 @@ if ('serviceWorker' in navigator && !['localhost', '127.0.0.1'].includes(locatio
       });
     });
   }).catch(() => {});
+  // ricarica solo per un aggiornamento, non alla prima installazione
+  const hadController = !!navigator.serviceWorker.controller;
   let reloading = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (!reloading) { reloading = true; location.reload(); }
+    if (hadController && !reloading) { reloading = true; location.reload(); }
   });
 }
