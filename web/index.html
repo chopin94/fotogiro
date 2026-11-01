@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#171b21">
+<meta name="description" content="Scanner 3D a piatto rotante per smartphone: dal video al file STL da stampare.">
+<title>Fotogiro</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><img src="icons/icon.svg" alt="">Fotogiro</div>
+  <a class="btn icon-btn" href="bersaglio.html">Bersaglio</a>
+  <button id="btnSettings" class="icon-btn" aria-label="Impostazioni">⚙</button>
+  <div class="chips">
+    <span id="chipFocal" class="chip">Obiettivo: da calibrare</span>
+    <span id="chipTable" class="chip">Piatto: manuale</span>
+  </div>
+</header>
+
+<main>
+  <section class="stage intro" id="stage">
+    <div class="view" id="camView">
+      <video id="video" playsinline muted></video>
+      <canvas id="frameCanvas" hidden></canvas>
+      <canvas id="overlay"></canvas>
+      <div class="hud" id="hud"></div>
+      <button class="swap" data-swap>Camera</button>
+      <div class="start" id="startPanel">
+        <h1>Scanner 3D a piatto rotante</h1>
+        <ol>
+          <li>Stampa il <a href="bersaglio.html">bersaglio</a> al 100% e incollalo sul piatto.</li>
+          <li>Metti l'oggetto al centro e il telefono fermo su un supporto.</li>
+          <li>Premi <b>Fotocamera</b> e fai girare il piatto: il solido si costruisce mentre giri.</li>
+        </ol>
+        <div class="row">
+          <button class="primary" data-act="camera">Fotocamera</button>
+          <button data-act="demo">Prova la demo</button>
+        </div>
+      </div>
+    </div>
+    <div class="mini3d" id="mini3d">
+      <canvas id="view3d"></canvas>
+      <button class="swap" data-swap>3D</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <p class="guide" id="guide">Stampa il bersaglio, incollalo sul piatto e premi «Fotocamera».</p>
+    <div class="progress" id="progress" hidden><div></div></div>
+    <div class="status-row">
+      <canvas id="coverage" width="300" height="300" aria-label="Copertura delle angolazioni"></canvas>
+      <dl class="stats">
+        <dt>Fotogrammi</dt><dd id="stKeys">0</dd>
+        <dt>Volume</dt><dd id="stVol">–</dd>
+        <dt>Ingombro</dt><dd id="stSize">–</dd>
+        <dt>Vista</dt><dd id="stView">–</dd>
+        <dt>Precisione</dt><dd id="stRms">–</dd>
+      </dl>
+    </div>
+
+    <div class="group-title">Acquisizione</div>
+    <div class="actions">
+      <button id="btnCamera" class="primary" data-act="camera">Fotocamera</button>
+      <label class="btn" for="fileVideo">Analizza video</label>
+      <input type="file" id="fileVideo" accept="video/*" hidden>
+      <button id="btnDemo" data-act="demo">Demo</button>
+      <button id="btnPause" disabled>Pausa</button>
+      <button id="btnReset">Ricomincia</button>
+    </div>
+
+    <div class="group-title">Piatto motorizzato (ESP32)</div>
+    <div class="actions">
+      <button id="btnConnect">Collega piatto</button>
+      <button id="btnAuto" disabled>Giro automatico</button>
+      <button id="btnStep" disabled>Ruota</button>
+    </div>
+
+    <div class="group-title">Modello</div>
+    <div class="actions">
+      <button id="btnBuild" class="accent" disabled>Genera modello</button>
+      <button id="btnStl" disabled>Scarica STL</button>
+      <button id="btnObj" disabled>OBJ</button>
+      <button id="btnShare" disabled>Condividi</button>
+    </div>
+    <div id="report" class="report"></div>
+
+    <details class="debug" id="debugPanel" open hidden>
+      <summary>Debug</summary>
+      <pre id="dbgInfo">–</pre>
+      <div class="actions">
+        <button id="dbgShot">Scatta ora</button>
+        <button id="dbgSave">Salva fotogramma</button>
+        <button id="dbgLogSave">Esporta log</button>
+      </div>
+      <label class="check"><input type="checkbox" id="dbgMask"> Silhouette sempre visibile</label>
+      <div class="dbg-console">
+        <input id="dbgCmd" placeholder="comando per il piatto, es. R 90 oppure ?" autocomplete="off" autocapitalize="characters">
+        <button id="dbgSend">Invia</button>
+      </div>
+      <pre id="dbgLog"></pre>
+    </details>
+  </section>
+</main>
+
+<dialog id="dlgSettings">
+  <form method="dialog" id="formSettings">
+    <h2>Impostazioni</h2>
+    <fieldset>
+      <legend>Bersaglio e volume</legend>
+      <label><span>Diametro bersaglio (mm)<small>quello scritto sul foglio stampato</small></span><input type="number" name="boardDiameter" min="80" max="200" step="1"></label>
+      <label><span>Raggio volume (mm)<small>0 = area libera del bersaglio</small></span><input type="number" name="volRadius" min="0" max="100" step="1"></label>
+      <label>Altezza volume (mm)<input type="number" name="volHeight" min="20" max="300" step="5"></label>
+      <label><span>Dettaglio<small>più fine = più memoria e più lento</small></span>
+        <select name="voxel"><option value="1.5">Basso (1,5 mm)</option><option value="1">Medio (1 mm)</option><option value="0.7">Alto (0,7 mm)</option></select></label>
+    </fieldset>
+    <fieldset>
+      <legend>Silhouette</legend>
+      <label><span>Sensibilità<small>più alta = tiene più oggetto</small></span><input type="range" name="sensitivity" min="0.6" max="1.6" step="0.05"></label>
+      <label><span>Tolleranza errori<small>viste sbagliate ignorate</small></span>
+        <select name="tolerance"><option value="1">Nessuna</option><option value="2">1 vista</option><option value="3">2 viste</option></select></label>
+      <label>Riempi i buchi della sagoma<input type="checkbox" name="fillHoles"></label>
+      <label><span>Ignora le ombre<small>utile con luce dura, rischioso con oggetti grigi</small></span><input type="checkbox" name="shadows"></label>
+    </fieldset>
+    <fieldset>
+      <legend>Ripresa</legend>
+      <label>Passo tra fotogrammi (°)<input type="number" name="azStep" min="2" max="20" step="1"></label>
+      <label><span>Velocità massima (°/s)<small>oltre, la foto è mossa</small></span><input type="number" name="maxSpeed" min="5" max="120" step="5"></label>
+      <label><span>Focale normalizzata<small>0 = calibrazione automatica</small></span><input type="number" name="focal" min="0" max="3" step="0.001"></label>
+      <label>Lisciatura del modello<input type="number" name="smooth" min="0" max="20" step="1"></label>
+    </fieldset>
+    <fieldset>
+      <legend>Piatto motorizzato</legend>
+      <label>Passo del giro automatico (°)<input type="number" name="tableStep" min="1" max="45" step="0.5"></label>
+      <label>Attesa dopo ogni passo (ms)<input type="number" name="tableSettle" min="100" max="5000" step="50"></label>
+      <label>Velocità del piatto (°/s)<input type="number" name="tableSpeed" min="2" max="180" step="1"></label>
+    </fieldset>
+    <fieldset>
+      <legend>Prove</legend>
+      <label><span>Modalità debug<small>tempi, log, console del piatto, salvataggio fotogrammi</small></span><input type="checkbox" name="debug"></label>
+    </fieldset>
+    <div class="buttons">
+      <button type="button" id="btnForgetFocal">Ricalibra obiettivo</button>
+      <button value="cancel">Annulla</button>
+      <button value="ok" class="primary">Salva</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" hidden></div>
+<div id="update" class="update" hidden><span>Nuova versione disponibile</span><button id="btnUpdate" class="primary">Aggiorna</button></div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

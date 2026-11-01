@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fotogiro – test</title>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; background: #fff; color: #111; }
+  .ok { color: #137333; } .ko { color: #b3261e; }
+  pre { white-space: pre-wrap; background: #f6f6f6; padding: 8px; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>Test di Fotogiro</h1>
+<p id="sum">In esecuzione…</p>
+<ol id="out"></ol>
+<script type="module">
+  import { registry, runRegistered } from './harness.mjs';
+  const files = (new URLSearchParams(location.search).get('files') || 'core,pipeline').split(',');
+  for (const f of files) await import(`./${f}.test.mjs`);
+  const out = document.getElementById('out');
+  const res = await runRegistered((r) => {
+    const li = document.createElement('li');
+    li.className = r.ok ? 'ok' : 'ko';
+    li.textContent = `${r.ok ? '✓' : '✗'} ${r.name} (${Math.round(r.ms)} ms)`;
+    if (!r.ok) { const pre = document.createElement('pre'); pre.textContent = r.error; li.append(pre); }
+    out.append(li);
+  });
+  document.getElementById('sum').textContent = `${res.pass} superati, ${res.failed} falliti su ${registry.length}`;
+  window.__testResult = res;
+</script>
+</body>
+</html>

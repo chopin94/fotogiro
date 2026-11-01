@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fotogiro – diagnostica</title>
+<style>
+  body { font: 13px/1.4 system-ui, sans-serif; margin: 12px; background: #fff; color: #111; }
+  canvas { max-width: 100%; border: 1px solid #ccc; image-rendering: pixelated; }
+  pre { background: #f4f4f4; padding: 8px; }
+</style>
+</head>
+<body>
+<p>Vista sintetica: elevazione <input id="el" type="number" value="30" size="3">° angolo <input id="an" type="number" value="60" size="3">°
+<button id="go">Segmenta</button> <button id="pipe">Pipeline</button></p>
+<canvas id="img" width="960" height="540"></canvas>
+<canvas id="cmp" width="480" height="270"></canvas>
+<pre id="log"></pre>
+<script type="module">
+  import { makeBoard } from '../web/js/board.js';
+  import { Segmenter } from '../web/js/segment.js';
+  import { scaleK, rotationAngleBetween } from '../web/js/geometry.js';
+  import { Scanner, downscaleRGBA } from '../web/js/scanner.js';
+  import { makeScene, fixedCamera, poseAt, renderView, hitParts, insideObject, DEMO_OBJECT } from '../web/js/sim.js';
+  const board = makeBoard({ diameter: 200 });
+  const scene = makeScene(board);
+  const seg = new Segmenter(board);
+  const log = (s) => { document.getElementById('log').textContent += s + '\n'; };
+  function truthMask(pose, w, h, K) {
+    const m = new Uint8Array(w * h);
+    const R = pose.R, t = pose.t;
+    const C = [-(R[0] * t[0] + R[3] * t[1] + R[6] * t[2]), -(R[1] * t[0] + R[4] * t[1] + R[7] * t[2]), -(R[2] * t[0] + R[5] * t[1] + R[8] * t[2])];
+    for (let v = 0; v < h; v++) for (let u = 0; u < w; u++) {
+      const dc = [(u - K.cx) / K.fx, (v - K.cy) / K.fy, 1];
+      const d = [R[0] * dc[0] + R[3] * dc[1] + R[6] * dc[2], R[1] * dc[0] + R[4] * dc[1] + R[7] * dc[2], R[2] * dc[0] + R[5] * dc[1] + R[8] * dc[2]];
+      const L = Math.hypot(...d);
+      if (hitParts(DEMO_OBJECT, C, [d[0] / L, d[1] / L, d[2] / L], Infinity)) m[v * w + u] = 1;
+    }
+    return m;
+  }
+  function segView() {
+    const el = +document.getElementById('el').value, an = +document.getElementById('an').value;
+    const cam = fixedCamera({ w: 960, h: 540, elevation: el, distance: 380 });
+    const pose = poseAt(cam, an);
+    const rgba = renderView(scene, cam, an);
+    document.getElementById('img').getContext('2d').putImageData(new ImageData(rgba, 960, 540), 0, 0);
+    const small = downscaleRGBA(rgba, 960, 540, 2);
+    const K = scaleK(cam.K, 2);
+    const res = seg.segment(small.data, 480, 270, K, pose.R, pose.t, { radius: 66, height: 120 });
+    const truth = truthMask(pose, 480, 270, K);
+    const out = new Uint8ClampedArray(480 * 270 * 4);
+    let fn = 0, fp = 0, pos = 0;
+    for (let i = 0; i < truth.length; i++) {
+      const g = small.data[i * 4] * 0.3;
+      let c = [g, g, g];
+      if (!res.inVol[i]) c = [g * 0.5, g * 0.5, g * 0.8];
+      if (truth[i] && res.mask[i]) c = [40, 170, 60];
+      if (truth[i] && !res.mask[i]) { c = [230, 30, 30]; fn++; }
+      if (!truth[i] && res.mask[i]) { c = [240, 210, 40]; fp++; }
+      if (truth[i]) pos++;
+      out.set([...c, 255], i * 4);
+    }
+    document.getElementById('cmp').getContext('2d').putImageData(new ImageData(out, 480, 270), 0, 0);
+    log(`el ${el} an ${an}: persi ${(100 * fn / pos).toFixed(1)}%  extra ${(100 * fp / pos).toFixed(1)}%  white=${JSON.stringify(res.white?.map((p) => p.map((x) => +x.toFixed(3))))} black=${res.black}`);
+  }
+  async function pipe() {
+    const sc = new Scanner({ boardDiameter: 200, voxel: 1.5, volHeight: 110 });
+    let time = 0;
+    for (const el of [22, 45]) {
+      const cam = fixedCamera({ w: 960, h: 540, elevation: el, distance: 380 });
+      for (let a = 0; a < 360; a += 12) {
+        const rgba = renderView(scene, cam, a, { seed: a + el });
+        const r = sc.processFrame(rgba, 960, 540, time, { force: true });
+        time += 1;
+        const truth = poseAt(cam, a);
+        log(`el ${el} a ${a}: ok=${r.ok} key=${r.keyframe} m=${r.markerCount} rms=${r.rms?.toFixed(2)} err=${r.ok ? rotationAngleBetween(r.R, truth.R).toFixed(2) : '-'} f=${sc.focalN.toFixed(4)} ${r.reason || ''} ${r.warnings.join(',')}`);
+        await new Promise((res) => setTimeout(res, 0));
+      }
+    }
+    const field = sc.volume.field();
+    let fp = 0, fn = 0, tp = 0;
+    for (let z = 1; z < 110; z += 2) for (let y = -60; y < 60; y += 2) for (let x = -60; x < 60; x += 2) {
+      const a = insideObject(DEMO_OBJECT, x, y, z);
+      const i = Math.floor((x - field.ox) / field.vs), j = Math.floor((y - field.oy) / field.vs), l = Math.floor(z / field.vs);
+      const b = i >= 0 && j >= 0 && l >= 0 && i < field.nx && j < field.ny && l < field.nz && field.data[i + field.nx * (j + field.ny * l)] > 0;
+      if (a && b) tp++; else if (a) fn++; else if (b) fp++;
+    }
+    log(`volume: tp ${tp} fn ${fn} fp ${fp} IoU ${(tp / (tp + fn + fp)).toFixed(3)} views ${sc.volume.views}`);
+    window.__dbg = sc;
+  }
+  document.getElementById('go').onclick = segView;
+  document.getElementById('pipe').onclick = pipe;
+  const q = new URLSearchParams(location.search);
+  if (q.get('run') === 'seg') segView();
+  if (q.get('run') === 'pipe') pipe();
+</script>
+</body>
+</html>

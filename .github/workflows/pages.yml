@@ -1,0 +1,54 @@
+name: Pubblica su GitHub Pages
+
+# Testa gli algoritmi e pubblica la PWA della cartella web/ a ogni push su main.
+# Se un test fallisce, la pubblicazione non avviene.
+
+on:
+  push:
+    branches: [main]
+    paths: ['web/**', 'tests/**', 'tools/**', 'package.json', '.github/workflows/pages.yml']
+  pull_request:
+    paths: ['web/**', 'tests/**', 'tools/**', 'package.json', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Test (marker, posa, silhouette, scultura, mesh, pipeline completa)
+        run: node --test
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Service worker con la versione del commit
+        run: node tools/build-sw.mjs "${GITHUB_SHA::10}"
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+      - id: deployment
+        uses: actions/deploy-pages@v4

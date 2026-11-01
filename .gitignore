@@ -1,0 +1,8 @@
+node_modules/
+.DS_Store
+Thumbs.db
+*.stl
+*.obj
+!tests/**/*.stl
+.claude/
+firmware/**/build/

@@ -1,0 +1,11 @@
+{
+  "name": "fotogiro",
+  "private": true,
+  "type": "module",
+  "description": "Scanner 3D a piatto rotante per smartphone (PWA)",
+  "scripts": {
+    "test": "node --test",
+    "sw": "node tools/build-sw.mjs"
+  },
+  "license": "MIT"
+}

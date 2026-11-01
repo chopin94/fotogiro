@@ -1,0 +1,18 @@
+{
+  "name": "Fotogiro – scanner 3D a piatto rotante",
+  "short_name": "Fotogiro",
+  "description": "Scansione 3D con lo smartphone e un piatto rotante: dal video al file STL da stampare.",
+  "lang": "it",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0f1216",
+  "theme_color": "#171b21",
+  "icons": [
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
