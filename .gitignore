@@ -5,4 +5,5 @@ Thumbs.db
 *.obj
 !tests/**/*.stl
 .claude/
+.supervisore/
 firmware/**/build/

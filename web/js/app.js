@@ -11,10 +11,10 @@ const $ = (id) => document.getElementById(id);
 const STORE = 'fotogiro.settings';
 const FOCAL_STORE = 'fotogiro.focal';
 // debug acceso di default finché il progetto è in prova: si spegne dalle impostazioni
-const APP_DEFAULTS = { ...DEFAULTS, tableStep: 5, tableSettle: 600, tableSpeed: 30, smooth: 6, debug: true };
+const APP_DEFAULTS = { ...DEFAULTS, tableStep: 5, tableSettle: 600, tableSpeed: 30, smooth: 6, debug: true, torch: false };
 const MAX_SIDE = 1280;
 // queste impostazioni cambiano la scansione: se cambiano si ricomincia
-const SCAN_KEYS = ['boardDiameter', 'volRadius', 'volHeight', 'voxel', 'tolerance', 'sensitivity', 'fillHoles', 'shadows', 'azStep', 'maxSpeed', 'focal'];
+const SCAN_KEYS = ['boardDiameter', 'volRadius', 'volHeight', 'voxel', 'tolerance', 'sensitivity', 'fillHoles', 'shadows', 'background', 'azStep', 'maxSpeed', 'focal'];
 
 function readJSON(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key) || 'null') ?? fallback; } catch { return fallback; }
@@ -24,7 +24,26 @@ function writeJSON(key, v) {
 }
 
 let settings = { ...APP_DEFAULTS, ...readJSON(STORE, {}) };
+// le versioni precedenti salvavano le ombre come sì/no: ora c'è "automatico"
+if (typeof settings.shadows === 'boolean') settings.shadows = 'auto';
 if (new URLSearchParams(location.search).has('debug')) settings.debug = true;
+// ?supervisore: solo con tools/supervisore.py sul PC (stessa origine): invia i dati di
+// debug della scansione mentre la si fa, per analizzarli e tarare l'app
+const SUPERVISE = new URLSearchParams(location.search).has('supervisore');
+let superviseLast = 0;
+
+function supervise(ev) {
+  if (!SUPERVISE) return;
+  fetch('/supervisore/evento', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(ev) }).catch(() => {});
+}
+
+function summarize(r) {
+  const keys = ['ok', 'reason', 'markerCount', 'markerIds', 'rms', 'azimuth', 'elevation', 'distance', 'speed', 'calibrating',
+    'calibProgress', 'f', 'warnings', 'timings', 'background', 'views', 'keyframe', 'detectSize'];
+  const out = {};
+  for (const k of keys) if (r[k] !== undefined) out[k] = r[k];
+  return out;
+}
 
 const state = {
   mode: 'idle',
@@ -129,6 +148,7 @@ function log(msg) {
   const t = new Date().toISOString().slice(11, 23);
   logLines.push(`${t} ${msg}`);
   if (logLines.length > 3000) logLines.shift();
+  supervise({ type: 'log', line: `${t} ${msg}` });
   if (!settings.debug) return;
   const el = $('dbgLog');
   el.textContent = logLines.slice(-150).join('\n');
@@ -162,13 +182,44 @@ function updateDebug(r) {
     `focale ${state.focalN ? `${state.focalN.toFixed(4)} (${r.f ? r.f.toFixed(0) : '–'} px)` : `in calibrazione ${Math.round((r.calibProgress || 0) * 100)}%`}`,
     r.ok ? `vista az ${r.azimuth.toFixed(1)}° el ${r.elevation.toFixed(1)}° dist ${r.distance.toFixed(0)} mm · ${r.speed.toFixed(1)}°/s` : 'vista –',
     `chiave ${state.keyframes} · integrate ${r.views ?? '–'} · voxel ${settings.voxel} mm · tolleranza ${settings.tolerance}`,
+    state.lastBackground ? `sfondo ${settings.background}: ${state.lastBackground.trusted ? 'affidabile' : 'NON affidabile (scolpisce solo sul foglio)'} · colori in comune con l’oggetto ${Math.round(state.lastBackground.overlap * 100)}%` : 'sfondo –',
     s ? `volume ${s.volumeCm3.toFixed(1)} cm³ · ${s.size.map((v) => v.toFixed(0)).join('×')} mm${s.touchTop ? ' · TOCCA IL TETTO' : ''}${s.touchSide ? ' · TOCCA IL BORDO' : ''}` : 'volume –',
     r.warnings.length ? `avvisi: ${r.warnings.join(', ')}` : 'avvisi: nessuno',
   ].join('\n');
 }
 
+function maskToDataURL(mask, w, h) {
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(w, h);
+  for (let i = 0; i < mask.length; i++) {
+    const v = mask[i];
+    const col = v === 1 ? [255, 70, 200] : v === 2 ? [150, 150, 150] : [0, 0, 0];
+    img.data.set([...col, 255], i * 4);
+  }
+  ctx.putImageData(img, 0, 0);
+  return c.toDataURL('image/png');
+}
+
+function superviseFrame(r, m) {
+  const now = performance.now();
+  if (r.keyframe) {
+    const src = state.mode === 'demo' || state.mode === 'replay' ? frameCanvas : grab;
+    supervise({
+      type: 'keyframe', res: { ...summarize(r), R: r.R, t: r.t, K: r.K },
+      jpeg: src.width ? src.toDataURL('image/jpeg', 0.82) : null,
+      mask: m.mask ? maskToDataURL(m.mask, m.maskW, m.maskH) : null,
+    });
+  } else if (now - superviseLast > 500) {
+    superviseLast = now;
+    supervise({ type: 'frame', res: summarize(r), stats: state.stats });
+  }
+}
+
 function saveDebugFrame() {
-  const src = state.mode === 'demo' ? frameCanvas : grab;
+  const src = state.mode === 'demo' || state.mode === 'replay' ? frameCanvas : grab;
   if (!src.width) { toast('Nessun fotogramma da salvare'); return; }
   const r = state.last || {};
   const data = {
@@ -211,7 +262,9 @@ function startWorker() {
   for (const id of ['btnStl', 'btnObj', 'btnShare', 'btnBuild']) $(id).disabled = true;
   const s = { ...settings };
   if (!s.focal && state.focalN) s.focal = state.focalN;
-  worker.postMessage({ type: 'init', settings: s });
+  state.lastBackground = null;
+  // i fotogrammi chiave restano nel worker: servono al secondo passaggio e a "Esporta scansione"
+  worker.postMessage({ type: 'init', settings: s, record: true });
   drawCoverage();
   updateStats();
 }
@@ -248,6 +301,17 @@ function onWorker(e) {
       break;
     case 'obj':
       download(new Blob([m.text], { type: 'text/plain' }), fileName('obj'));
+      break;
+    case 'export':
+      exportScan(m.frames, m.focalN);
+      break;
+    case 'progress':
+      setProgress(m.f);
+      setGuide(`${m.label}: ${Math.round(m.f * 100)}% — tolgo la stanza dove ha colori che l’oggetto non ha`);
+      break;
+    case 'refined':
+      setProgress(null);
+      log(`secondo passaggio su ${m.views} viste: ${m.before.volumeCm3.toFixed(1)} → ${m.after.volumeCm3.toFixed(1)} cm³, ingombro ${m.before.size.map((v) => v.toFixed(0)).join('×')} → ${m.after.size.map((v) => v.toFixed(0)).join('×')} mm`);
       break;
     case 'error':
       console.error(m.message);
@@ -287,6 +351,7 @@ function scheduleNext() {
   if (state.mode === 'camera') requestAnimationFrame(pumpCamera);
   else if (state.mode === 'video') nextVideoFrame();
   else if (state.mode === 'demo') nextDemoFrame();
+  else if (state.mode === 'replay') nextReplayFrame();
 }
 
 function handleFrame(m) {
@@ -304,6 +369,7 @@ function handleFrame(m) {
     }
   }
   if (r.coverage) state.coverage = r.coverage;
+  if (r.background) state.lastBackground = r.background;
   const wasForced = state.inflightForced;
   if (wasForced && state.forcedWaiter) {
     const w = state.forcedWaiter;
@@ -315,6 +381,7 @@ function handleFrame(m) {
   updateHud(r);
   updateStats();
   updateDebug(r);
+  if (SUPERVISE) superviseFrame(r, m);
   $('btnBuild').disabled = !(r.views >= 6 || (state.stats && state.stats.views >= 6));
 }
 
@@ -328,7 +395,10 @@ function showSource(kind) {
 }
 
 function setMode(mode) {
-  if (mode !== state.mode) log(`modalità: ${mode}`);
+  if (mode !== state.mode) {
+    log(`modalità: ${mode}`);
+    if (mode !== 'idle') supervise({ type: 'start', mode, settings, userAgent: navigator.userAgent });
+  }
   state.mode = mode;
   $('btnPause').disabled = mode === 'idle';
   $('btnPause').textContent = 'Pausa';
@@ -341,6 +411,9 @@ function stopAll() {
   state.running = false;
   state.auto = false;
   if (state.stream) { for (const t of state.stream.getTracks()) t.stop(); state.stream = null; }
+  state.torchTrack = null;
+  state.torchOn = false;
+  $('btnTorch').hidden = true;
   video.pause();
   video.removeAttribute('src');
   video.srcObject = null;
@@ -386,11 +459,41 @@ async function startCamera() {
   state.focalN = settings.focal || loadFocal(state.focalKey);
   showSource('video');
   setMode('camera');
+  setupTorch(track);
   startWorker();
   state.running = true;
   requestWakeLock();
   setGuide('Inquadra il bersaglio con l’oggetto al centro');
   requestAnimationFrame(pumpCamera);
+}
+
+// Flash (torcia) della fotocamera posteriore: Chrome su Android lo permette,
+// Safari su iPhone in genere no.
+function setupTorch(track) {
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+  state.torchTrack = caps.torch ? track : null;
+  state.torchOn = false;
+  const b = $('btnTorch');
+  b.hidden = false;
+  b.disabled = !state.torchTrack;
+  b.textContent = state.torchTrack ? 'Flash' : 'Flash non disponibile';
+  b.classList.remove('active');
+  log(`flash ${state.torchTrack ? 'disponibile' : 'non disponibile su questo telefono/browser'}`);
+  if (state.torchTrack && settings.torch) setTorch(true);
+}
+
+async function setTorch(on) {
+  if (!state.torchTrack) return;
+  try {
+    await state.torchTrack.applyConstraints({ advanced: [{ torch: on }] });
+    state.torchOn = on;
+    $('btnTorch').classList.toggle('active', on);
+    $('btnTorch').textContent = on ? 'Flash acceso' : 'Flash';
+    log(`flash ${on ? 'acceso' : 'spento'}`);
+  } catch (err) {
+    toast(`Flash: ${err.message}`);
+    log(`! flash: ${err.message}`);
+  }
 }
 
 function pumpCamera() {
@@ -478,6 +581,81 @@ function onDemoFrame(e) {
   postFrame(m.buf, m.w, m.h, state.demo.i * 0.5, true);
 }
 
+// ---------------------------------------------------------------- esporta / riapri
+
+const blobToDataURL = (blob) => new Promise((resolve, reject) => {
+  const r = new FileReader();
+  r.onload = () => resolve(r.result);
+  r.onerror = () => reject(r.error);
+  r.readAsDataURL(blob);
+});
+
+// Un file con i fotogrammi chiave veri, le pose, le impostazioni e il log:
+// serve a ricalcolare e tarare tutto senza rifare la scansione.
+async function exportScan(frames, focalN) {
+  if (!frames || !frames.length) {
+    toast('Nessun fotogramma registrato: la registrazione è attiva solo con il debug acceso, dall’inizio della scansione');
+    return;
+  }
+  toast(`Preparo ${frames.length} fotogrammi…`);
+  const out = [];
+  for (const f of frames) out.push({ time: f.time, w: f.w, h: f.h, meta: f.meta, jpeg: await blobToDataURL(f.blob) });
+  const data = {
+    app: 'fotogiro', kind: 'scansione', version: 1, created: new Date().toISOString(),
+    userAgent: navigator.userAgent, mode: state.mode, settings, focalN: focalN || state.focalN, focalKey: state.focalKey,
+    log: logLines, frames: out,
+  };
+  const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+  log(`scansione esportata: ${out.length} fotogrammi, ${(blob.size / 1e6).toFixed(1)} MB`);
+  const file = new File([blob], fileName('scansione.json'), { type: 'application/json' });
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: 'Scansione Fotogiro' }); return; }
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+  }
+  download(file, file.name);
+}
+
+async function startReplay(data) {
+  if (!data || data.app !== 'fotogiro' || !Array.isArray(data.frames) || !data.frames.length) {
+    toast('File non valido: serve un "scansione.json" esportato da Fotogiro');
+    return;
+  }
+  stopAll();
+  showSource('canvas');
+  setMode('replay');
+  // la focale registrata, se non ne è impostata una a mano (da "Ricalibra" si riparte da zero)
+  state.focalKey = null;
+  state.focalN = settings.focal || data.focalN || 0;
+  startWorker();
+  state.replay = { frames: data.frames, i: 0 };
+  state.running = true;
+  log(`riapro scansione del ${data.created}: ${data.frames.length} fotogrammi · impostazioni originali ${JSON.stringify(data.settings)}`);
+  setGuide(`Ricalcolo ${data.frames.length} fotogrammi con le impostazioni attuali…`);
+  nextReplayFrame();
+}
+
+async function nextReplayFrame() {
+  if (!state.running || state.mode !== 'replay' || state.busy) return;
+  const rp = state.replay;
+  if (rp.i >= rp.frames.length) {
+    finishSource('Scansione ricalcolata: genero il modello');
+    buildModel();
+    return;
+  }
+  const f = rp.frames[rp.i++];
+  state.busy = true;
+  setProgress(rp.i / rp.frames.length);
+  const blob = await (await fetch(f.jpeg)).blob();
+  const bmp = await createImageBitmap(blob);
+  if (frameCanvas.width !== bmp.width || frameCanvas.height !== bmp.height) { frameCanvas.width = bmp.width; frameCanvas.height = bmp.height; }
+  const ctx = frameCanvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(bmp, 0, 0);
+  bmp.close();
+  const img = ctx.getImageData(0, 0, frameCanvas.width, frameCanvas.height);
+  postFrame(img.data.buffer, img.width, img.height, f.time, true);
+}
+
 // ---------------------------------------------------------------- disegno
 
 function frameRect(cw, ch) {
@@ -503,7 +681,11 @@ function drawOverlay() {
     if (maskCanvas.width !== w || maskCanvas.height !== h) { maskCanvas.width = w; maskCanvas.height = h; }
     const mctx = maskCanvas.getContext('2d');
     const img = mctx.createImageData(w, h);
-    for (let i = 0; i < data.length; i++) if (data[i]) { img.data[i * 4] = 255; img.data[i * 4 + 1] = 70; img.data[i * 4 + 2] = 200; img.data[i * 4 + 3] = 110; }
+    // magenta = oggetto sicuro, grigio = sconosciuto (non scolpisce)
+    for (let i = 0; i < data.length; i++) {
+      if (data[i] === 1) { img.data[i * 4] = 255; img.data[i * 4 + 1] = 70; img.data[i * 4 + 2] = 200; img.data[i * 4 + 3] = 110; }
+      else if (data[i] === 2) { img.data[i * 4] = 150; img.data[i * 4 + 1] = 150; img.data[i * 4 + 2] = 150; img.data[i * 4 + 3] = 70; }
+    }
     mctx.putImageData(img, 0, 0);
     ctx.drawImage(maskCanvas, ox, oy, fw * sc, fh * sc);
   }
@@ -643,6 +825,9 @@ function updateGuide(r) {
     text = advice(r.coverage.fractions, r.elevation);
     if (text.startsWith('Copertura ottima')) cls = 'ok';
     if (r.elevation > 75) { text = 'Vista troppo dall’alto: abbassa un po’ il telefono'; cls = 'warn'; }
+    else if (state.lastBackground && !state.lastBackground.trusted && state.mode !== 'demo') {
+      text += ' · Sfondo disordinato: fai anche giri alti (50–70°) o metti un cartoncino uniforme dietro';
+    }
   }
   if (state.stats && state.stats.touchTop) { text += ' · L’oggetto tocca il tetto del volume: aumenta l’altezza nelle impostazioni'; cls = 'warn'; }
   else if (state.stats && state.stats.touchSide) { text += ' · L’oggetto esce dal cilindro: aumenta il raggio del volume'; cls = 'warn'; }
@@ -680,6 +865,7 @@ function onFinal(m) {
   setBig3d(true);
   const r = m.report;
   log(`modello: ${r.triangles} triangoli · chiuso ${r.watertight} (${r.badEdges} spigoli aperti) · ${r.size.map((v) => v.toFixed(1)).join('×')} mm · ${r.volumeCm3.toFixed(2)} cm³`);
+  if (SUPERVISE) fetch('/supervisore/stl', { method: 'POST', body: m.stl.slice(0) }).catch(() => {});
   const size = r.size.map((v) => v.toFixed(1)).join(' × ');
   $('report').innerHTML = `<b>${r.triangles.toLocaleString('it-IT')}</b> triangoli · ` +
     (r.watertight ? '<span class="ok">solido chiuso, pronto da stampare</span>' : `<span class="bad">${r.badEdges} spigoli aperti</span>`) +
@@ -758,7 +944,8 @@ function readSettingsForm() {
   const out = { ...settings };
   for (const el of f.elements) {
     if (!el.name || !(el.name in settings)) continue;
-    out[el.name] = el.type === 'checkbox' ? el.checked : Number(el.value);
+    if (el.type === 'checkbox') out[el.name] = el.checked;
+    else out[el.name] = typeof settings[el.name] === 'string' ? el.value : Number(el.value);
   }
   return out;
 }
@@ -791,6 +978,8 @@ $('fileVideo').addEventListener('change', (e) => {
   e.target.value = '';
 });
 
+$('btnTorch').addEventListener('click', () => setTorch(!state.torchOn));
+
 $('btnPause').addEventListener('click', () => {
   if (state.mode === 'idle') return;
   state.running = !state.running;
@@ -805,6 +994,7 @@ $('btnReset').addEventListener('click', () => {
   setBig3d(false);
   if (state.mode === 'demo') startDemo();
   else if (state.mode === 'video') { state.video.t = 0; state.running = true; nextVideoFrame(true); }
+  else if (state.mode === 'replay') { state.replay.i = 0; state.running = true; nextReplayFrame(); }
   else if (state.mode === 'camera') { state.running = true; requestAnimationFrame(pumpCamera); }
 });
 
@@ -844,6 +1034,16 @@ table.addEventListener('line', (e) => { log(`← ${e.detail}`); updateTableUi();
 table.addEventListener('sent', (e) => log(`→ ${e.detail}`));
 
 // debug
+$('dbgExport').addEventListener('click', () => {
+  if (!worker) { toast('Nessuna scansione in corso'); return; }
+  worker.postMessage({ type: 'export' });
+});
+$('fileReplay').addEventListener('change', async (e) => {
+  const f = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  try { await startReplay(JSON.parse(await f.text())); } catch (err) { toast(`File non leggibile: ${err.message}`); }
+});
 $('dbgShot').addEventListener('click', () => { state.forceNext = true; log('scatto forzato'); });
 $('dbgSave').addEventListener('click', saveDebugFrame);
 $('dbgLogSave').addEventListener('click', () => {
@@ -888,6 +1088,9 @@ updateTableUi();
 updateStats();
 applyDebug();
 if (!viewer.ok) { $('mini3d').hidden = true; log('WebGL2 non disponibile: niente anteprima 3D'); }
+// ?replay=indirizzo: riapre una scansione esportata (per tarare l'app sul computer)
+const replayUrl = new URLSearchParams(location.search).get('replay');
+if (replayUrl) fetch(replayUrl).then((r) => r.json()).then(startReplay).catch((err) => toast(`Scansione non caricata: ${err.message}`));
 
 // ---------------------------------------------------------------- PWA
 

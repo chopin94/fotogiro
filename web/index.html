@@ -69,6 +69,7 @@
       <label class="btn" for="fileVideo">Analizza video</label>
       <input type="file" id="fileVideo" accept="video/*" hidden>
       <button id="btnDemo" data-act="demo">Demo</button>
+      <button id="btnTorch" hidden>Flash</button>
       <button id="btnPause" disabled>Pausa</button>
       <button id="btnReset">Ricomincia</button>
     </div>
@@ -92,6 +93,11 @@
     <details class="debug" id="debugPanel" open hidden>
       <summary>Debug</summary>
       <pre id="dbgInfo">–</pre>
+      <div class="actions">
+        <button id="dbgExport">Esporta scansione</button>
+        <label class="btn" for="fileReplay">Riapri scansione</label>
+        <input type="file" id="fileReplay" accept=".json,application/json" hidden>
+      </div>
       <div class="actions">
         <button id="dbgShot">Scatta ora</button>
         <button id="dbgSave">Salva fotogramma</button>
@@ -120,14 +126,18 @@
     </fieldset>
     <fieldset>
       <legend>Silhouette</legend>
+      <label><span>Sfondo<small>in una stanza qualsiasi scolpisce solo sopra il foglio</small></span>
+        <select name="background"><option value="auto">Automatico</option><option value="uniforme">Telo o parete uniforme</option><option value="stanza">Stanza (solo bersaglio)</option></select></label>
       <label><span>Sensibilità<small>più alta = tiene più oggetto</small></span><input type="range" name="sensitivity" min="0.6" max="1.6" step="0.05"></label>
       <label><span>Tolleranza errori<small>viste sbagliate ignorate</small></span>
         <select name="tolerance"><option value="1">Nessuna</option><option value="2">1 vista</option><option value="3">2 viste</option></select></label>
       <label>Riempi i buchi della sagoma<input type="checkbox" name="fillHoles"></label>
-      <label><span>Ignora le ombre<small>utile con luce dura, rischioso con oggetti grigi</small></span><input type="checkbox" name="shadows"></label>
+      <label><span>Ignora le ombre<small>automatico: sì se l'oggetto è colorato (con oggetti grigi è rischioso)</small></span>
+        <select name="shadows"><option value="auto">Automatico</option><option value="si">Sì</option><option value="no">No</option></select></label>
     </fieldset>
     <fieldset>
       <legend>Ripresa</legend>
+      <label><span>Flash acceso all'avvio<small>luce che si muove con il telefono: ombre dietro l'oggetto</small></span><input type="checkbox" name="torch"></label>
       <label>Passo tra fotogrammi (°)<input type="number" name="azStep" min="2" max="20" step="1"></label>
       <label><span>Velocità massima (°/s)<small>oltre, la foto è mossa</small></span><input type="number" name="maxSpeed" min="5" max="120" step="5"></label>
       <label><span>Focale normalizzata<small>0 = calibrazione automatica</small></span><input type="number" name="focal" min="0" max="3" step="0.001"></label>

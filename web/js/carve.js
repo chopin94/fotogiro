@@ -56,6 +56,9 @@ export class VoxelVolume {
     for (let i = 0; i < this.k; i++) this.vals.push(new Int16Array(n).fill(EMPTY));
     this.seen = new Uint8Array(n);
     this.dead = new Uint8Array(n);
+    // quante viste hanno visto il voxel cadere su un pixel sicuramente "oggetto"
+    this.evidence = new Uint8Array(n);
+    this.useEvidence = false;
     this.views = 0;
     // fuori dal cilindro: vuoto per sempre
     const r2 = radius * radius;
@@ -69,9 +72,11 @@ export class VoxelVolume {
   }
 
   // Integra una vista: sdf in pixel (positivo dentro), K/R/t riferiti a quella immagine.
-  integrate(sdf, w, h, K, R, t) {
+  // mask (facoltativa): 1 = pixel sicuramente oggetto, per contare le prove.
+  integrate(sdf, w, h, K, R, t, mask = null) {
     const P = projectionMatrix(K, R, t);
-    const { nx, ny, nz, vs, ox, oy, k, seen, dead } = this;
+    const { nx, ny, nz, vs, ox, oy, k, seen, dead, evidence } = this;
+    if (mask) this.useEvidence = true;
     const v0 = this.vals[0], v1 = this.vals[1], v2 = this.vals[2];
     const invF = 1 / K.fx;
     const deadLim = -Math.max(20, Math.round(25 * vs));
@@ -97,6 +102,7 @@ export class VoxelVolume {
           let q = Math.round((a + (b - a) * fy) * W * invF * 10);
           if (q < -32000) q = -32000; else if (q > 32000) q = 32000;
           if (seen[idx] < 255) seen[idx]++;
+          if (mask && evidence[idx] < 255 && mask[Math.round(v) * w + Math.round(u)] === 1) evidence[idx]++;
           if (k === 1) {
             if (q < v0[idx]) v0[idx] = q;
             if (v0[idx] < deadLim) dead[idx] = 1;
@@ -113,6 +119,14 @@ export class VoxelVolume {
       }
     }
     this.views++;
+  }
+
+  // Un voxel conta solo se è stato visto abbastanza e, quando si contano le prove,
+  // se almeno una vista lo ha visto su un pixel sicuramente "oggetto": così le zone
+  // che nessuna vista poteva giudicare (sfondo sconosciuto) non diventano solido.
+  usable(idx, minSeen) {
+    if (this.dead[idx] === 2 || this.seen[idx] < minSeen) return false;
+    return !this.useEvidence || this.evidence[idx] > 0;
   }
 
   // Campo scalare in mm (positivo = dentro) pronto per l'estrazione della superficie.
@@ -132,7 +146,7 @@ export class VoxelVolume {
               for (let di = 0; di < step; di++) {
                 const idx = (i * step + di) + nx * ((j * step + dj) + ny * (l * step + dl));
                 let val;
-                if (this.dead[idx] === 2 || this.seen[idx] < minSeen) val = out0;
+                if (!this.usable(idx, minSeen)) val = out0;
                 else val = vk[idx] === EMPTY ? out0 : vk[idx] / 10;
                 acc += val; cnt++;
               }
@@ -158,7 +172,7 @@ export class VoxelVolume {
       for (let j = 0; j < ny; j++) {
         for (let i = 0; i < nx; i++) {
           const idx = i + nx * (j + ny * l);
-          if (this.dead[idx] === 2 || this.seen[idx] < minSeen || vk[idx] <= 0 || vk[idx] === EMPTY) continue;
+          if (!this.usable(idx, minSeen) || vk[idx] <= 0 || vk[idx] === EMPTY) continue;
           n++;
           const x = this.ox + (i + 0.5) * vs, y = this.oy + (j + 0.5) * vs, z = (l + 0.5) * vs;
           if (x < x0) x0 = x; if (x > x1) x1 = x;

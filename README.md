@@ -38,6 +38,12 @@ niente server, niente account, niente app da store.
 In alternativa puoi registrare un video con la fotocamera del telefono e usare
 **Analizza video**. **Demo** fa vedere tutto il processo con un piatto simulato.
 
+Funziona anche **con il telefono in mano**, girando intorno al piatto fermo, e in
+una stanza qualsiasi: se lo sfondo ha colori in comune con l'oggetto l'app scolpisce
+solo dove vede il foglio e alla fine fa un **secondo passaggio** (quando conosce tutti
+i colori dell'oggetto) per togliere il resto. In quel caso fai anche giri alti
+(50–70°). Il pulsante **Flash** accende la luce del telefono (Chrome su Android).
+
 ### Con il piatto motorizzato
 
 - **Android + Bluetooth:** *Collega piatto* → *Giro automatico*. L'app ruota di un passo,
@@ -74,6 +80,8 @@ Tutto il calcolo pesante gira in un Web Worker; l'anteprima 3D è WebGL2 senza l
 - La base è sempre **piatta** (l'oggetto appoggia sul foglio): ottimo per stampare.
 - Oggetti **trasparenti o a specchio** e oggetti dello **stesso colore dello sfondo** danno
   silhouette sbagliate. Luce diffusa e sfondo a contrasto aiutano molto.
+- Le **ombre** sul foglio vengono ignorate in automatico solo se l'oggetto è colorato:
+  con oggetti grigi o bianchi un'ombra e l'oggetto si confondono.
 - Il dettaglio è circa 1 mm (impostabile 0,7 mm). Per dettagli fini servirebbe la
   fotogrammetria "classica" su PC.
 
@@ -84,6 +92,21 @@ con `?debug` nell'indirizzo). Mostra tempi di calcolo per fase, marker visti con
 numero, focale, copertura, log degli eventi, una **console per mandare comandi al piatto**
 (`R 90`, `?`...) e permette di **salvare il fotogramma** corrente con tutti i dati di posa
 (file `.json`) e di **esportare il log**: mandali pure quando qualcosa non va.
+
+**Esporta scansione** salva in un file i fotogrammi chiave veri con pose, impostazioni e
+log; **Riapri scansione** li ricalcola con le impostazioni attuali, senza rifare la
+scansione (utile per tarare). Sul computer si può anche aprire `web/?debug&replay=<file>`.
+
+### Supervisione dal PC (solo sviluppo)
+
+```bash
+python tools/supervisore.py
+```
+
+Serve il progetto in HTTPS sulla rete locale (certificato autofirmato: sul telefono
+"Avanzate → Procedi") e stampa l'indirizzo da aprire sul telefono,
+`https://<ip-del-pc>:8443/web/?debug&supervisore`. Durante la scansione il telefono
+invia fotogrammi chiave, sagome, pose, log e STL in `.supervisore/<data-ora>/` sul PC.
 
 ## Struttura
 

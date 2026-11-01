@@ -23,7 +23,8 @@ export const DEFAULTS = {
   maxSpeed: 12, // gradi al secondo: oltre, il fotogramma è mosso
   sensitivity: 1,
   fillHoles: true,
-  shadows: false,
+  shadows: 'auto', // auto (sì se l'oggetto è colorato) | si | no
+  background: 'auto', // auto | uniforme | stanza (scolpisce solo sopra il bersaglio)
   maskWidth: 480,
   detectWidth: 1280,
   focal: 0, // focale normalizzata (f / lato lungo); 0 = calibrazione automatica
@@ -79,6 +80,20 @@ export class Scanner {
     this.last = null;
     this.focalN = this.s.focal > 0 ? this.s.focal : 0;
     this.keyCount = 0;
+    this.untrustedViews = 0;
+  }
+
+  // Secondo passaggio: un nuovo scanner che conosce già focale e colori dell'oggetto.
+  // Rielaborando gli stessi fotogrammi scolpisce anche la stanza dove ha colori
+  // che l'oggetto non ha.
+  refined() {
+    const s2 = new Scanner({ ...this.s, focal: this.focalN });
+    s2.segmenter.freezeObjectModel(this.segmenter.objHist, this.segmenter.objTotal);
+    return s2;
+  }
+
+  get wantsRefine() {
+    return !!this.focalN && this.untrustedViews >= 4 && this.segmenter.objTotal > 2000;
   }
 
   // f in pixel per un'immagine con lato lungo `maxDim`.
@@ -148,7 +163,11 @@ export class Scanner {
       res.keyframe = true;
       if (this.focalN) {
         const out = this.integrate(item, pose, timings);
-        if (out) { res.mask = out.mask; res.maskW = small.w; res.maskH = small.h; if (out.warn) res.warnings.push(out.warn); }
+        if (out) {
+          res.mask = out.mask; res.maskW = small.w; res.maskH = small.h;
+          res.background = { clean: out.clean, overlap: out.overlap, trusted: out.trustBg };
+          if (out.warn) res.warnings.push(out.warn);
+        }
         else res.warnings.push('silhouette non calcolata (bersaglio poco visibile)');
       } else {
         this.backlog.push(item);
@@ -205,13 +224,14 @@ export class Scanner {
     const Kmask = scaleK(scaleK({ fx: this.focalFor(item.maxDet), fy: this.focalFor(item.maxDet), cx: item.cx, cy: item.cy }, 1 / item.sd), item.sm);
     const ts = performance.now();
     const seg = this.segmenter.segment(item.rgba, item.w, item.h, Kmask, pose.R, pose.t, this.volumeSpec, {
-      sensitivity: s.sensitivity, fillHoles: s.fillHoles, shadows: s.shadows,
+      sensitivity: s.sensitivity, fillHoles: s.fillHoles, shadows: s.shadows, background: s.background,
     });
     timings.segment = performance.now() - ts;
     if (!seg || !seg.white) return null;
+    if (!seg.trustBg) this.untrustedViews++;
     const tc = performance.now();
     const sdf = signedDistance(seg.mask, item.w, item.h);
-    this.volume.integrate(sdf, item.w, item.h, Kmask, pose.R, pose.t);
+    this.volume.integrate(sdf, item.w, item.h, Kmask, pose.R, pose.t, seg.mask);
     timings.carve = performance.now() - tc;
     return seg;
   }

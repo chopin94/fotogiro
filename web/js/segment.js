@@ -3,9 +3,12 @@
 // - Sopra il bersaglio sappiamo esattamente cosa dovremmo vedere (lo abbiamo
 //   stampato noi): ciò che non coincide con il disegno atteso è l'oggetto.
 // - Fuori dal bersaglio impariamo i colori dello sfondo dalle zone che
-//   l'oggetto non può occupare (fuori dal volume di scansione proiettato).
-// Nel dubbio si sceglie "oggetto": un errore in quel verso aggiunge un po'
-// di volume che le altre viste toglieranno, l'errore opposto scaverebbe buchi.
+//   l'oggetto non può occupare (fuori dal volume di scansione proiettato), ma
+//   solo se lo sfondo è uniforme; in una stanza qualsiasi quei pixel restano
+//   "sconosciuti" e a scolpire ci pensano le viste in cui l'oggetto sta sul foglio.
+// Nel dubbio si sceglie "oggetto" o "sconosciuto": un errore in quel verso
+// aggiunge un po' di volume che le altre viste toglieranno, l'errore opposto
+// scaverebbe buchi.
 
 import { boardTexture, texCoord, sampleTex } from './board.js';
 import { invert3, project, solve } from './geometry.js';
@@ -17,6 +20,19 @@ export class Segmenter {
   constructor(board) {
     this.board = board;
     this.tex = boardTexture(board, { ppm: 2, sigmas: [0.6, 1.2, 2.4] });
+    // colori dell'oggetto accumulati su tutti i fotogrammi (l'oggetto non cambia)
+    this.objHist = new Float32Array(HSIZE);
+    this.objTotal = 0;
+    this.frozen = false;
+  }
+
+  // Secondo passaggio: i colori dell'oggetto sono ormai noti (da tutta la scansione).
+  // Fuori dal bersaglio, un colore che l'oggetto non ha mai mostrato è sfondo anche
+  // in una stanza disordinata.
+  freezeObjectModel(hist, total) {
+    this.objHist = Float32Array.from(hist);
+    this.objTotal = total;
+    this.frozen = true;
   }
 
   segment(rgba, w, h, K, R, t, vol, opts = {}) {
@@ -68,6 +84,7 @@ export class Segmenter {
     const ho = new Float32Array(HSIZE);
     let nb = 0, no = 0;
     const diff = new Float32Array(n);
+    const shade = new Uint8Array(n); // sembra un'ombra sul foglio
     for (let v = 0; v < h; v++) {
       for (let u = 0; u < w; u++) {
         const i = v * w + u;
@@ -83,9 +100,9 @@ export class Segmenter {
             const dc = Math.abs(rgba[j + ch] - E) / Math.max(W - black[ch], 40);
             if (dc > d) d = dc;
           }
-          if (opts.shadows && t0 > 0.6) d = shadowDamp(rgba, j, white, black, u, v, t0, d);
           diff[i] = d;
-          if (inVol[i] && d > 0.7) { ho[colorBin(r, g, b)]++; no++; }
+          if (d > tBoard && t0 > 0.6 && isShadowLike(rgba, j, white, black, u, v, t0)) shade[i] = 1;
+          else if (inVol[i] && d > 0.7) { ho[colorBin(r, g, b)]++; no++; }
         } else if (!inVol[i] && (u & 1) === 0 && (v & 1) === 0) {
           hb[colorBin(r, g, b)]++;
           nb++;
@@ -93,28 +110,100 @@ export class Segmenter {
       }
     }
     const hasBg = nb > 150;
-    if (hasBg) { blurHist(hb); }
-    if (no > 50) blurHist(ho);
+    const clean = hasBg ? topShare(hb, nb, 24) : 0;
+    if (hasBg) blurHist(hb);
     const kb = HSIZE / Math.max(1, nb);
-    const ko = HSIZE / Math.max(1, no);
+    const objHist = this.objHist;
+    if (!this.frozen) {
+      for (let b = 0; b < HSIZE; b++) objHist[b] += ho[b];
+      this.objTotal += no;
+    }
+    const ob = Float32Array.from(objHist);
+    blurHist(ob);
+    const ko = HSIZE / Math.max(1, this.objTotal);
+    // Quanta parte dei colori dell'oggetto compare anche nello sfondo. Se tanta (una
+    // stanza qualsiasi, oggetti colorati intorno) fuori dal bersaglio non si può decidere
+    // nulla con sicurezza: quei pixel restano sconosciuti.
+    // Finché non conosciamo abbastanza i colori dell'oggetto, prudenza: sconosciuto.
+    let overlap = 1;
+    if (hasBg && this.objTotal > 200) {
+      overlap = 0;
+      for (let b = 0; b < HSIZE; b++) if (objHist[b] && hb[b] * kb >= tDens) overlap += objHist[b];
+      overlap /= this.objTotal;
+    }
+    const mode = opts.background || 'auto';
+    const trustBg = hasBg && (mode === 'uniforme' || (mode === 'auto' && overlap < 0.12 && clean >= 0.6));
+    // Ombre: un'ombra è il foglio con meno luce, stesso colore. Se l'oggetto è colorato
+    // non si confonde con un'ombra e quei pixel sono sfondo. Serve soprattutto con il
+    // telefono in mano: la luce è ferma rispetto al foglio e l'ombra cade sempre nello
+    // stesso punto, quindi nessuna vista la toglierebbe. Con oggetti grigi meglio di no.
+    const sh = opts.shadows ?? 'auto';
+    const colorful = this.colorfulShare();
+    const shadowsOn = sh === true || sh === 'si' || (sh === 'auto' && colorful > 0.6);
     for (let i = 0; i < n; i++) {
       if (!inVol[i]) continue;
       if (tv[i] >= 0) {
-        mask[i] = diff[i] > tBoard ? 1 : 0;
-      } else if (!hasBg) {
-        mask[i] = 1;
+        if (diff[i] <= tBoard) mask[i] = BACKGROUND;
+        else mask[i] = shadowsOn && shade[i] ? BACKGROUND : OBJECT;
+      } else if (!trustBg) {
+        if (this.frozen && hasBg) {
+          const j = i * 4;
+          const bin = colorBin(rgba[j], rgba[j + 1], rgba[j + 2]);
+          mask[i] = ob[bin] * ko < 0.05 && hb[bin] * kb >= tDens ? BACKGROUND : UNKNOWN;
+        } else {
+          mask[i] = UNKNOWN;
+        }
       } else {
         const j = i * 4;
         const bin = colorBin(rgba[j], rgba[j + 1], rgba[j + 2]);
         const db = hb[bin] * kb;
-        const dob = no > 50 ? ho[bin] * ko : 0;
-        mask[i] = db < tDens || (dob > 4 * db && db < 25 * sens) ? 1 : 0;
+        const dob = this.objTotal > 50 ? ob[bin] * ko : 0;
+        if (db < tDens) mask[i] = OBJECT; // colore mai visto nello sfondo
+        else if (dob > 0.25 * db) mask[i] = UNKNOWN; // colore sia dell'oggetto sia dello sfondo
+        else mask[i] = BACKGROUND;
       }
     }
     majority(mask, w, h, inVol);
     if (opts.fillHoles !== false) fillHoles(mask, w, h);
-    return { mask, w, h, inVol, warn: hasBg ? null : 'sfondo non visibile: allontana il telefono', white, black };
+    let warn = null;
+    if (!hasBg) warn = 'sfondo non visibile: allontana il telefono';
+    return { mask, w, h, inVol, warn, white, black, clean, overlap, trustBg, colorful, shadowsOn };
   }
+
+  // Quota dei colori dell'oggetto decisamente colorati (non grigi).
+  colorfulShare() {
+    if (this.objTotal < 500) return 0;
+    let c = 0;
+    const hst = this.objHist;
+    for (let b = 0; b < HSIZE; b++) {
+      if (!hst[b]) continue;
+      const r = ((b >> 10) & 31) * 8 + 4, g = ((b >> 5) & 31) * 8 + 4, bl = (b & 31) * 8 + 4;
+      const mx = Math.max(r, g, bl), mn = Math.min(r, g, bl);
+      if ((mx - mn) / mx > 0.25) c += hst[b];
+    }
+    return c / this.objTotal;
+  }
+}
+
+// Valori della maschera. Per la scultura "sconosciuto" conta come oggetto
+// (non toglie nulla); solo OBJECT è una prova che lì c'è l'oggetto.
+export const BACKGROUND = 0;
+export const OBJECT = 1;
+export const UNKNOWN = 2;
+
+// Quota dei campioni che cade nei `k` colori più frequenti.
+function topShare(hist, total, k) {
+  const top = new Float32Array(k);
+  for (let i = 0; i < hist.length; i++) {
+    const v = hist[i];
+    if (v <= top[k - 1]) continue;
+    let j = k - 1;
+    while (j > 0 && top[j - 1] < v) { top[j] = top[j - 1]; j--; }
+    top[j] = v;
+  }
+  let s = 0;
+  for (const v of top) s += v;
+  return s / Math.max(1, total);
 }
 
 function colorBin(r, g, b) {
@@ -140,7 +229,7 @@ function blurHist(hst) {
 }
 
 // Ombra: stesso colore del foglio, solo più scuro.
-function shadowDamp(rgba, j, white, black, u, v, t0, d) {
+function isShadowLike(rgba, j, white, black, u, v, t0) {
   let li = 0, le = 0;
   const E = [0, 0, 0];
   for (let ch = 0; ch < 3; ch++) {
@@ -149,12 +238,12 @@ function shadowDamp(rgba, j, white, black, u, v, t0, d) {
     li += rgba[j + ch];
     le += E[ch];
   }
-  if (li < 1 || le < 1) return d;
+  if (li < 1 || le < 1) return false;
   const ratio = li / le;
-  if (ratio < 0.35 || ratio > 0.97) return d;
+  if (ratio < 0.3 || ratio > 0.95) return false;
   let cd = 0;
   for (let ch = 0; ch < 3; ch++) cd += Math.abs(rgba[j + ch] / li - E[ch] / le);
-  return cd < 0.05 ? d * 0.25 : d;
+  return cd < 0.06;
 }
 
 function fitWhite(rgba, w, h, kind, inVol) {
@@ -302,26 +391,30 @@ export function fillPolygon(m, w, h, poly) {
   }
 }
 
+// Toglie i pixel isolati tra oggetto e sfondo (gli sconosciuti restano tali).
 function majority(mask, w, h, inVol) {
   const src = mask.slice();
   for (let y = 1; y < h - 1; y++) {
     for (let x = 1; x < w - 1; x++) {
       const i = y * w + x;
-      if (!inVol[i]) continue;
-      const s = src[i - w - 1] + src[i - w] + src[i - w + 1] + src[i - 1] + src[i] + src[i + 1] + src[i + w - 1] + src[i + w] + src[i + w + 1];
-      mask[i] = s >= 5 ? 1 : 0;
+      if (!inVol[i] || src[i] === UNKNOWN) continue;
+      let s = 0;
+      for (let dy = -w; dy <= w; dy += w) for (let dx = -1; dx <= 1; dx++) if (src[i + dy + dx] !== BACKGROUND) s++;
+      mask[i] = s >= 5 ? OBJECT : BACKGROUND;
     }
   }
 }
 
-// Riempie i buchi chiusi della silhouette (sfondo non collegato al bordo).
+// Riempie i buchi chiusi della silhouette: sfondo non collegato né al bordo
+// dell'immagine né a zone sconosciute.
 export function fillHoles(mask, w, h) {
   const seen = new Uint8Array(w * h);
   const stack = new Int32Array(w * h);
   let sp = 0;
-  const push = (i) => { if (!mask[i] && !seen[i]) { seen[i] = 1; stack[sp++] = i; } };
+  const push = (i) => { if (mask[i] !== OBJECT && !seen[i]) { seen[i] = 1; stack[sp++] = i; } };
   for (let x = 0; x < w; x++) { push(x); push((h - 1) * w + x); }
   for (let y = 0; y < h; y++) { push(y * w); push(y * w + w - 1); }
+  for (let i = 0; i < w * h; i++) if (mask[i] === UNKNOWN) push(i);
   while (sp) {
     const i = stack[--sp];
     const x = i % w, y = (i - x) / w;
@@ -336,9 +429,10 @@ export function fillHoles(mask, w, h) {
 // Distanza con segno dal contorno della silhouette, in pixel (positiva dentro).
 // Distanza euclidea esatta (Felzenszwalb–Huttenlocher): niente direzioni privilegiate,
 // che sul solido diventerebbero rigature.
+// Oggetto e sconosciuto contano entrambi come "dentro".
 export function signedDistance(mask, w, h, maxD = 24) {
-  const din = edt(mask, w, h, 0); // dentro: distanza dal pixel di sfondo più vicino
-  const dout = edt(mask, w, h, 1); // fuori: distanza dal pixel di oggetto più vicino
+  const din = edt(mask, w, h, false); // dentro: distanza dal pixel di sfondo più vicino
+  const dout = edt(mask, w, h, true); // fuori: distanza dal pixel non di sfondo più vicino
   const sd = new Float32Array(w * h);
   for (let i = 0; i < w * h; i++) {
     const d = mask[i] ? Math.sqrt(din[i]) - 0.5 : 0.5 - Math.sqrt(dout[i]);
@@ -349,8 +443,9 @@ export function signedDistance(mask, w, h, maxD = 24) {
 
 const BIG = 1e12;
 
-// Distanza euclidea al quadrato dal pixel più vicino con mask == site.
-function edt(mask, w, h, site) {
+// Distanza euclidea al quadrato dal pixel più vicino che è "dentro" (inside = true)
+// oppure sfondo (inside = false).
+function edt(mask, w, h, inside) {
   const n = Math.max(w, h);
   const f = new Float64Array(n);
   const d = new Float64Array(n);
@@ -358,7 +453,7 @@ function edt(mask, w, h, site) {
   const z = new Float64Array(n + 1);
   const out = new Float64Array(w * h);
   for (let x = 0; x < w; x++) {
-    for (let y = 0; y < h; y++) f[y] = mask[y * w + x] === site ? 0 : BIG;
+    for (let y = 0; y < h; y++) f[y] = (mask[y * w + x] !== 0) === inside ? 0 : BIG;
     edt1d(f, h, d, v, z);
     for (let y = 0; y < h; y++) out[y * w + x] = d[y];
   }
